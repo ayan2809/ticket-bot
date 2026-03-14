@@ -2,17 +2,12 @@ import os
 import json
 import logging
 import random
+import re
 import time
 import requests
+from urllib.parse import unquote, urlparse, parse_qs
 from bs4 import BeautifulSoup
 from abc import ABC, abstractmethod
-
-# curl_cffi impersonates Chrome's TLS fingerprint to bypass Cloudflare
-try:
-    from curl_cffi import requests as cf_requests
-    HAS_CURL_CFFI = True
-except ImportError:
-    HAS_CURL_CFFI = False
 
 # Configure logging
 logging.basicConfig(
@@ -111,97 +106,101 @@ class BaseScraper(ABC):
         pass
 
 class BookMyShowScraper(BaseScraper):
+    """Monitors BMS indirectly via Google Search to bypass Cloudflare.
+    
+    BMS uses enterprise Cloudflare protection that blocks all datacenter IPs.
+    Instead of fighting the WAF, we search Google for new BMS event pages
+    matching our keywords. Google indexes BMS pages within hours.
+    """
     PLATFORM = "BookMyShow"
-    # Internal JSON API — bypasses Cloudflare WAF that blocks the HTML page
-    API_URL = "https://in.bookmyshow.com/api/explore/v1/events"
-    API_PARAMS = {"categoryCode": "SP", "regionCode": "BANG"}
-    # Fallback HTML page if the API also gets blocked
-    HTML_URL = "https://in.bookmyshow.com/explore/sports-bengaluru"
-    # Chrome browser version to impersonate (TLS fingerprint)
-    IMPERSONATE = "chrome120"
+    
+    # Multiple Google search queries to cast a wide net
+    GOOGLE_QUERIES = [
+        'site:in.bookmyshow.com rcb bengaluru ipl 2026',
+        'site:in.bookmyshow.com royal challengers bengaluru tickets',
+        'site:in.bookmyshow.com chinnaswamy ipl 2026',
+    ]
+    GOOGLE_URL = "https://www.google.com/search"
 
-    def _api_headers(self):
-        """Headers that mimic an XHR/fetch call from the BMS website."""
+    def _google_headers(self):
+        """Headers that look like a normal browser doing a Google search."""
         return {
             "User-Agent": random.choice(self.USER_AGENTS),
-            "Accept": "application/json, text/plain, */*",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://in.bookmyshow.com/explore/sports-bengaluru",
-            "Origin": "https://in.bookmyshow.com",
-            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.google.com/",
             "DNT": "1",
         }
 
-    def _cf_get(self, url, **kwargs):
-        """Make a GET request using curl_cffi (Chrome TLS) with fallback to requests."""
-        if HAS_CURL_CFFI:
-            return cf_requests.get(url, impersonate=self.IMPERSONATE, **kwargs)
-        else:
-            logger.warning("curl_cffi not available, using requests (may get blocked by Cloudflare).")
-            return self.session.get(url, **kwargs)
+    def _extract_google_urls(self, html):
+        """Extract bookmyshow.com URLs from Google search results HTML."""
+        soup = BeautifulSoup(html, 'html.parser')
+        urls = set()
+        
+        # Method 1: Standard result links in <a> tags
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            # Google wraps results in /url?q=<actual_url>&... format
+            if '/url?q=' in href:
+                parsed = parse_qs(urlparse(href).query)
+                actual_url = parsed.get('q', [''])[0]
+                if 'bookmyshow.com' in actual_url:
+                    urls.add(actual_url)
+            elif 'bookmyshow.com' in href and href.startswith('http'):
+                urls.add(href)
+        
+        # Method 2: Look for raw BMS URLs anywhere in the page text
+        raw_urls = re.findall(
+            r'https?://in\.bookmyshow\.com/[^\s"\'\'<>]+', 
+            html
+        )
+        for url in raw_urls:
+            # Clean trailing punctuation
+            url = url.rstrip('.,;)]\'"')
+            urls.add(url)
+        
+        return urls
 
-    def _extract_links_from_json(self, data):
-        """Extract matching event links from BMS API JSON response."""
-        links = []
-        json_str = json.dumps(data)
-        # Walk through every string value in the JSON looking for event links
-        for item in data.get("BookMyShow", {}).get("arrEvents", []):
-            url = item.get("EventURL", "")
-            title = item.get("EventTitle", "")
-            if self._matches_keywords(url) or self._matches_keywords(title):
-                full_url = url if url.startswith("http") else f"https://in.bookmyshow.com{url}"
-                links.append(full_url)
-        # Broad fallback: if any keyword appears anywhere in JSON, add the explore URL
-        if not links and any(k in json_str.lower() for k in self.KEYWORDS):
-            links.append(self.HTML_URL)
-        return links
+    def _filter_relevant_urls(self, urls):
+        """Filter for URLs that contain RCB/IPL keywords (event-specific pages)."""
+        relevant = []
+        for url in urls:
+            url_lower = url.lower()
+            # Skip generic/unrelated BMS pages
+            if any(skip in url_lower for skip in ['/offers/', '/gift-cards', '/corporates', '/privacy']):
+                continue
+            # Match keywords in the URL path
+            if self._matches_keywords(url_lower):
+                relevant.append(url)
+            # Also include direct sports event pages (they have event IDs like ET00XXXXXX)
+            elif re.search(r'/sports/.*?/ET\d+', url):
+                relevant.append(url)
+        return relevant
 
-    def _try_api(self):
-        """Hit the internal JSON API with one retry on 403/429."""
-        for attempt in range(2):
+    def scrape(self):
+        logger.info(f"Scraping {self.PLATFORM} via Google Search index...")
+        all_urls = set()
+        
+        for query in self.GOOGLE_QUERIES:
             try:
-                if attempt > 0:
-                    time.sleep(random.uniform(3, 6))
-                resp = self._cf_get(
-                    self.API_URL,
-                    params=self.API_PARAMS,
-                    headers=self._api_headers(),
+                time.sleep(random.uniform(1, 3))  # Be polite to Google
+                resp = self.session.get(
+                    self.GOOGLE_URL,
+                    params={"q": query, "num": 20, "hl": "en"},
+                    headers=self._google_headers(),
                     timeout=15
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                return self._extract_links_from_json(data)
+                found = self._extract_google_urls(resp.text)
+                logger.info(f"  Query '{query}': found {len(found)} BMS URLs")
+                all_urls.update(found)
             except Exception as e:
-                status = getattr(getattr(e, 'response', None), 'status_code', '???')
-                logger.warning(f"BMS API attempt {attempt + 1} failed (HTTP {status}): {e}")
-        return None  # Signal to fall back to HTML scraping
-
-    def _try_html(self):
-        """Fallback: scrape the explore page directly with Chrome TLS."""
-        try:
-            resp = self._cf_get(self.HTML_URL, headers=self._get_headers(), timeout=15)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            links = []
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                text = a.get_text()
-                if self._matches_keywords(href) or self._matches_keywords(text):
-                    full_url = href if href.startswith('http') else f"https://in.bookmyshow.com{href}"
-                    links.append(full_url)
-            return list(set(links))
-        except Exception as e:
-            status = getattr(getattr(e, 'response', None), 'status_code', '???')
-            logger.warning(f"BMS HTML fallback failed (HTTP {status}). Gracefully skipping.")
-            return []
-
-    def scrape(self):
-        logger.info(f"Scraping {self.PLATFORM} via internal API (TLS impersonation: {'ON' if HAS_CURL_CFFI else 'OFF'})...")
-        links = self._try_api()
-        if links is None:
-            logger.info("BMS API blocked, falling back to HTML scrape...")
-            links = self._try_html()
-        return list(set(links))
+                logger.warning(f"Google search failed for '{query}': {e}")
+        
+        # Filter for actually relevant RCB/IPL event URLs
+        relevant = self._filter_relevant_urls(all_urls)
+        logger.info(f"  Total relevant BMS URLs: {len(relevant)}")
+        return list(set(relevant))
 
 class DistrictScraper(BaseScraper):
     PLATFORM = "District"
