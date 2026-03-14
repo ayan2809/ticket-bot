@@ -147,12 +147,7 @@ cython_debug/
 # VS Code
 .vscode/
 
-# Project specific
-seen_events.json
-# Note: In this specific project, the user WANTS to commit seen_events.json back to repo.
-# So I will EXCLUDE it from .gitignore by default, or rather NOT include it here.
-# Wait, the spec says "Ensure the workflow handles the state persistence (committing the updated seen_events.json back to the repository)".
-# So it MUST NOT be ignored.
+
 
 # OS generated files
 .DS_Store
