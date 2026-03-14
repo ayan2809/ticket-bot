@@ -105,41 +105,91 @@ class BaseScraper(ABC):
 
 class BookMyShowScraper(BaseScraper):
     PLATFORM = "BookMyShow"
-    URL = "https://in.bookmyshow.com/explore/sports-bengaluru"
+    # Internal JSON API — bypasses Cloudflare WAF that blocks the HTML page
+    API_URL = "https://in.bookmyshow.com/api/explore/v1/events"
+    API_PARAMS = {"categoryCode": "SP", "regionCode": "BANG"}
+    # Fallback HTML page if the API also gets blocked
+    HTML_URL = "https://in.bookmyshow.com/explore/sports-bengaluru"
 
-    def scrape(self):
-        logger.info(f"Scraping {self.PLATFORM}...")
+    def _api_headers(self):
+        """Headers that mimic an XHR/fetch call from the BMS website."""
+        return {
+            "User-Agent": random.choice(self.USER_AGENTS),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://in.bookmyshow.com/explore/sports-bengaluru",
+            "Origin": "https://in.bookmyshow.com",
+            "X-Requested-With": "XMLHttpRequest",
+            "DNT": "1",
+        }
+
+    def _try_api(self):
+        """Hit the internal JSON API with one retry on 403/429."""
+        for attempt in range(2):
+            try:
+                if attempt > 0:
+                    time.sleep(random.uniform(3, 6))
+                resp = self.session.get(
+                    self.API_URL,
+                    params=self.API_PARAMS,
+                    headers=self._api_headers(),
+                    timeout=15
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                links = []
+                json_str = json.dumps(data)
+                # Walk through every string value in the JSON looking for event links
+                for item in data.get("BookMyShow", {}).get("arrEvents", []):
+                    url = item.get("EventURL", "")
+                    title = item.get("EventTitle", "")
+                    if self._matches_keywords(url) or self._matches_keywords(title):
+                        full_url = url if url.startswith("http") else f"https://in.bookmyshow.com{url}"
+                        links.append(full_url)
+                # Broad fallback: if any keyword appears anywhere in JSON, add the event URL
+                if not links and any(k in json_str.lower() for k in self.KEYWORDS):
+                    links.append(self.HTML_URL)
+                return links
+            except requests.exceptions.HTTPError as e:
+                logger.warning(f"BMS API attempt {attempt + 1} blocked (HTTP {e.response.status_code}).")
+            except Exception as e:
+                logger.warning(f"BMS API attempt {attempt + 1} failed: {e}")
+        return None  # Signal to fall back to HTML scraping
+
+    def _try_html(self):
+        """Fallback: scrape the explore page directly."""
         try:
-            response = self.session.get(self.URL, headers=self._get_headers(), timeout=15)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
+            resp = self.session.get(self.HTML_URL, headers=self._get_headers(), timeout=15)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, 'html.parser')
             links = []
-
-            # BMS often uses event cards or generic <a> tags
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 text = a.get_text()
-                
-                # Check for keywords in URL or Link text
                 if self._matches_keywords(href) or self._matches_keywords(text):
-                    # Clean up the URL
                     full_url = href if href.startswith('http') else f"https://in.bookmyshow.com{href}"
                     links.append(full_url)
-            
             return list(set(links))
         except requests.exceptions.HTTPError as e:
-            logger.warning(f"BMS blocked request (HTTP {e.response.status_code}). Gracefully skipping.")
+            logger.warning(f"BMS HTML fallback blocked (HTTP {e.response.status_code}). Gracefully skipping.")
             return []
         except Exception as e:
-            logger.error(f"Error scraping BMS: {e}")
+            logger.error(f"BMS HTML fallback error: {e}")
             return []
+
+    def scrape(self):
+        logger.info(f"Scraping {self.PLATFORM} via internal API...")
+        links = self._try_api()
+        if links is None:
+            logger.info("BMS API blocked, falling back to HTML scrape...")
+            links = self._try_html()
+        return list(set(links))
 
 class DistrictScraper(BaseScraper):
     PLATFORM = "District"
     URLS = [
         "https://www.district.in/search?q=rcb",
-        "https://www.district.in/sports"
+        "https://www.district.in/search?q=royal+challengers",
     ]
 
     def scrape(self):
