@@ -208,9 +208,11 @@ def main():
                 logger.debug(f"Already seen: {link}")
     
     if new_found:
-        state_manager.save()
+        logger.info("New event(s) found — saving updated state.")
     else:
         logger.info("No new events found.")
+    
+    state_manager.save()
 
 if __name__ == "__main__":
     main()
