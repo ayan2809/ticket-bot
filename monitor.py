@@ -53,7 +53,7 @@ class TelegramNotifier:
             return
 
         message = (
-            f"🚨 NEW RCB EVENT DETECTED ON {platform} 🚨\n"
+            f"🚨 RCB vs CSK TICKET ALERT ON {platform} 🚨\n"
             f"Link: {url}"
         )
         
@@ -73,6 +73,7 @@ class TelegramNotifier:
 
 class BaseScraper(ABC):
     KEYWORDS = ["royal-challengers", "rcb", "chinnaswamy", "ipl"]
+    CSK_KEYWORDS = ["csk", "chennai", "chennai-super-kings", "super-kings"]
     
     USER_AGENTS = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -96,10 +97,13 @@ class BaseScraper(ABC):
         }
 
     def _matches_keywords(self, text):
+        """Check if text matches both RCB and CSK keywords (RCB vs CSK match only)."""
         if not text:
             return False
         text = text.lower()
-        return any(keyword in text for keyword in self.KEYWORDS)
+        has_rcb = any(keyword in text for keyword in self.KEYWORDS)
+        has_csk = any(keyword in text for keyword in self.CSK_KEYWORDS)
+        return has_rcb and has_csk
 
     @abstractmethod
     def scrape(self):
@@ -116,9 +120,9 @@ class BookMyShowScraper(BaseScraper):
     
     # Multiple Google search queries to cast a wide net
     GOOGLE_QUERIES = [
-        'site:in.bookmyshow.com rcb bengaluru ipl 2026',
-        'site:in.bookmyshow.com royal challengers bengaluru tickets',
-        'site:in.bookmyshow.com chinnaswamy ipl 2026',
+        'site:in.bookmyshow.com rcb csk ipl 2026',
+        'site:in.bookmyshow.com royal challengers chennai super kings tickets',
+        'site:in.bookmyshow.com rcb vs csk chinnaswamy 2026',
     ]
     GOOGLE_URL = "https://www.google.com/search"
 
@@ -205,8 +209,8 @@ class BookMyShowScraper(BaseScraper):
 class DistrictScraper(BaseScraper):
     PLATFORM = "District"
     URLS = [
-        "https://www.district.in/search?q=rcb",
-        "https://www.district.in/search?q=royal+challengers",
+        "https://www.district.in/search?q=rcb+vs+csk",
+        "https://www.district.in/search?q=royal+challengers+vs+chennai+super+kings",
     ]
 
     def scrape(self):
@@ -265,12 +269,10 @@ class RCBShopScraper(BaseScraper):
     PLATFORM = "RCB Official Shop"
     URL = "https://shop.royalchallengers.com/ticket"
     
-    # Keywords that suggest tickets are actively listed (beyond the static shell)
+    # Keywords specific to RCB vs CSK match
     TICKET_KEYWORDS = [
-        "add to cart", "buy now", "book now", "sold out",
-        "match", "vs", "chinnaswamy", "ipl 2026", "ipl 2025",
-        "ticket price", "stand", "pavilion", "gallery",
-        "select seat", "seat map", "availability",
+        "csk", "chennai", "super kings", "vs csk",
+        "rcb vs chennai", "chennai super kings",
     ]
 
     def _check_for_ticket_content(self, html):
