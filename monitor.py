@@ -252,13 +252,103 @@ class DistrictScraper(BaseScraper):
             
         return list(set(all_links))
 
+class RCBShopScraper(BaseScraper):
+    """Monitors the official RCB shop ticket page for ticket availability.
+    
+    The page at https://shop.royalchallengers.com/ticket is a React SPA.
+    We monitor it by:
+    1. Scanning the HTML response for ticket/match-related keywords in meta tags,
+       inline scripts, and any server-rendered content.
+    2. Checking for signs of active ticket listings (e.g., Razorpay checkout 
+       integration, match-specific data in inline scripts).
+    """
+    PLATFORM = "RCB Official Shop"
+    URL = "https://shop.royalchallengers.com/ticket"
+    
+    # Keywords that suggest tickets are actively listed (beyond the static shell)
+    TICKET_KEYWORDS = [
+        "add to cart", "buy now", "book now", "sold out",
+        "match", "vs", "chinnaswamy", "ipl 2026", "ipl 2025",
+        "ticket price", "stand", "pavilion", "gallery",
+        "select seat", "seat map", "availability",
+    ]
+
+    def _check_for_ticket_content(self, html):
+        """Check if the page HTML contains indicators of active ticket listings."""
+        soup = BeautifulSoup(html, 'html.parser')
+        indicators = []
+        
+        # Check meta tags for ticket-specific content
+        for meta in soup.find_all('meta'):
+            content = meta.get('content', '')
+            if any(kw in content.lower() for kw in self.TICKET_KEYWORDS):
+                indicators.append(f"Meta tag: {content[:100]}")
+        
+        # Check for inline script data (SPAs often embed initial state)
+        for script in soup.find_all('script'):
+            if script.string:
+                script_text = script.string.lower()
+                for kw in self.TICKET_KEYWORDS:
+                    if kw in script_text:
+                        indicators.append(f"Script contains: '{kw}'")
+                        break
+        
+        # Check page title changes (might update when tickets are live)
+        title = soup.find('title')
+        if title and title.string:
+            title_text = title.string.lower()
+            if any(kw in title_text for kw in ['ticket', 'match', 'book', 'ipl']):
+                indicators.append(f"Title: {title.string}")
+        
+        # Check if there are significantly more DOM elements than the bare shell
+        # The empty SPA shell has very few elements in <body>
+        body = soup.find('body')
+        if body:
+            all_elements = body.find_all()
+            # An active ticket page would have many more rendered elements
+            # The bare shell only has noscript + div#rcb-shop
+            if len(all_elements) > 10:
+                indicators.append(f"Body has {len(all_elements)} elements (possible SSR content)")
+        
+        return indicators
+
+    def scrape(self):
+        logger.info(f"Scraping {self.PLATFORM}...")
+        results = []
+        
+        try:
+            response = self.session.get(
+                self.URL,
+                headers=self._get_headers(),
+                timeout=15
+            )
+            response.raise_for_status()
+            
+            indicators = self._check_for_ticket_content(response.text)
+            
+            if indicators:
+                logger.info(f"  Ticket indicators found on RCB shop:")
+                for ind in indicators:
+                    logger.info(f"    - {ind}")
+                results.append(self.URL)
+            else:
+                logger.info(f"  No active ticket indicators on RCB shop (SPA shell only).")
+                
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"RCB shop returned HTTP {e.response.status_code}. Skipping.")
+        except Exception as e:
+            logger.error(f"Error scraping RCB shop: {e}")
+        
+        return results
+
 def main():
     state_manager = StateManager()
     notifier = TelegramNotifier()
     
     scrapers = [
         BookMyShowScraper(),
-        DistrictScraper()
+        DistrictScraper(),
+        RCBShopScraper(),
     ]
     
     new_found = False
